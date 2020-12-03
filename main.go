@@ -1,16 +1,45 @@
 package main
 
 import (
+	"flag"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/andygrunwald/cachet"
 	"github.com/prometheus/alertmanager/template"
+)
+
+const (
+	landingPage = `<html>
+	<head>
+		<title>Prometheus Cachet</title>
+		<style>
+			body { color: #ffffff; background-color: #26282b; font-family: monospace; padding: 1%% }
+			a:-webkit-any-link { color: #ffffff; text-decoration: underline }
+			a:hover { color: #ff5959 }
+			.footer { position: fixed; bottom: 0; text-align: center }
+		</style>
+	</head>
+	<body>
+		<h2>Prometheus Cachet <small>Integration</small></h2>
+		<p>Small go based microservice to receive Prometheus Alertmanager triggers and update corresponding incidents in Cachet.</p>
+		<p class="footer">GitHub: %s</p>
+	</body>
+</html>`
+	github = "https://github.com/gregdhill/prometheus-cachet"
+)
+
+var (
+	// Flag assignment
+	portNumber = flag.String("port", "8080", "The port number to listen on for HTTP requests.")
+	address    = flag.String("address", "0.0.0.0", "The address to listen on for HTTP requests.")
+
+	logLevel   = flag.String("level", "info", "The level of logs to log")	
 )
 
 type alerts struct {
@@ -19,16 +48,35 @@ type alerts struct {
 	mutex     sync.Mutex
 }
 
+func loglevel(opt string) {
+	switch opt {
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	case "warn":
+		log.SetLevel(log.WarnLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	default:
+		log.Warnln("Unrecognized log level, will default to `info` log level")
+	}
+}
+
 func (alt *alerts) cachetAlert(status, name, message string) {
 	if _, ok := alt.incidents[name]; ok {
 		if strings.ToUpper(status) == "RESOLVED" {
-			log.Printf("Resolving alert \"%s\".\n", name)
-			alt.client.Incidents.Delete(alt.incidents[name])
+			log.Infof("Resolving alert \"%s\"", name)
+			incidentResolve := &cachet.IncidentUpdate{
+				Message: "This incdent has been resolved, we apologise for any inconvenience caused.",
+				Status:  cachet.IncidentStatusFixed,
+			}
+			alt.client.IncidentUpdates.Create(alt.incidents[name],incidentResolve)
 			alt.mutex.Lock()
 			delete(alt.incidents, name)
 			alt.mutex.Unlock()
 		} else {
-			log.Printf("Alert \"%s\" already reported.\n", name)
+			log.Infof("Alert \"%s\" already reported.", name)
 		}
 		return
 	}
@@ -40,60 +88,72 @@ func (alt *alerts) cachetAlert(status, name, message string) {
 	}
 	newIncident, _, _ := alt.client.Incidents.Create(incident)
 
-	log.Printf("Reported: %s\n", newIncident.Name)
+	log.Infof("Incident reported: %s", newIncident.Name)
 
 	id := newIncident.ID
 	alt.mutex.Lock()
 	alt.incidents[name] = id
 	alt.mutex.Unlock()
 
-	log.Printf("ID: %d\n", newIncident.ID)
+	log.Debugf("Incident created with ID: %d", newIncident.ID)
 }
 
 func (alt *alerts) prometheusAlert(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	log.Println("Receiving alert...")
+
+	log.Info("Receiving incoming alert")
 	data := template.Data{}
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		log.Printf("Error decoding alert: %s", err.Error())
-		log.Println(r.Body)
+		log.Errorf("Error decoding alert: %s", err.Error())
+		log.Debugf("Body: ",r.Body)
 		return
 	}
 	status := data.Status
-	// log.Printf("Alerts: Status=%v", data.Status)
 	for _, alert := range data.Alerts {
-		// log.Printf("Alert: status=%s,Labels=%v,Annotations=%v", alert.Status, alert.Labels, alert.Annotations)
+		log.Debugf("Alert: status=%s,Labels=%v,Annotations=%v", alert.Status, alert.Labels, alert.Annotations)
 		alt.cachetAlert(status, alert.Labels["alertname"], alert.Annotations["summary"])
 	}
 }
 
-func health(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Alive")
+func (alt *alerts) health(w http.ResponseWriter, r *http.Request) {
+	pong, _, err := alt.client.General.Ping()
+
+	if(pong == "Pong!" && err == nil) {
+		fmt.Fprint(w, "Healthy.")
+	} else {
+		log.Errorf("Cachet API issue. Response: %s, ERR: %s", pong, err)
+		fmt.Fprint(w, "Unhealthy.")
+	}
+}
+
+func landing(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte(fmt.Sprintf(landingPage, github)))
 }
 
 func main() {
+	flag.Parse()
+
+	loglevel(*logLevel)
+
 	statusPage := os.Getenv("CACHET_URL")
 	if len(statusPage) == 0 {
-		panic("CACHET_URL must not be empty.")
+		log.Fatalf("Cachet URL not provided, please set enviroment variable 'CACHET_URL'.")
 	}
 	client, err := cachet.NewClient(statusPage, nil)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to initialize cachet client sdk: %s", err)
 	}
 	apiKey := os.Getenv("CACHET_KEY")
 	if len(apiKey) == 0 {
-		panic("CACHET_KEY must not be empty.")
+		log.Fatalf("Cachet API Token not provided, please set enviroment variable 'CACHET_KEY'.")
 	}
 	client.Authentication.SetTokenAuth(apiKey)
-	// client.Authentication.SetBasicAuth("test@example.com", "test123")
 
 	alerts := alerts{incidents: make(map[string]int), client: client}
-	http.HandleFunc("/health", health)
+	http.HandleFunc("/", landing)
+	http.HandleFunc("/health", alerts.health)
 	http.HandleFunc("/webhook", alerts.prometheusAlert)
-	listenAddress := ":80"
-	if os.Getenv("PORT") != "" {
-		listenAddress = ":" + os.Getenv("PORT")
-	}
-	log.Printf("Listening on %v", listenAddress)
-	log.Fatal(http.ListenAndServe(listenAddress, nil))
+
+	log.Infof("Listening for requests on %s:%s", *address, *portNumber)
+	log.Fatalf("Failed to start web server: %s", http.ListenAndServe(fmt.Sprintf("%s:%s", *address, *portNumber), nil))
 }

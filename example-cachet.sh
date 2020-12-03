@@ -1,7 +1,15 @@
 #!/bin/bash
 
-alert='
-[{
+webhookURL="http://127.0.0.1:8080/webhook"
+debug=true
+
+function fail() {
+	echo "Failed to curl..."
+	exit 1
+}
+
+rawPayload='
+{
   "status": "firing",
   "alerts": [
     {
@@ -16,18 +24,20 @@ alert='
        }
     }
   ]
-}]'
+}'
 
-# alert=$(echo $alert | jq -rc .)
-# echo $alert
+if (${debug}); then
+	alert=$(echo $rawPayload | jq '.')
+	echo $alert
+fi
 
-curl -XPOST -d "$alert" "http://127.0.0.1:8000/webhook"
+curl -XPOST -d "$rawPayload" "${webhookURL}" || fail
 
 echo -e "\nPress enter to resolve."
 read
 
-alert='
-[{
+rawPayload='
+{
   "status": "resolved",
   "alerts": [
     {
@@ -42,6 +52,11 @@ alert='
        }
     }
   ]
-}]'
+}'
 
-curl -XPOST -d "$alert" "http://127.0.0.1:8000/webhook"
+if (${debug}); then
+        alert=$(echo $rawPayload | jq '.')
+        echo $alert
+fi
+
+curl -XPOST -d "$rawPayload" "${webhookURL}" || fail
