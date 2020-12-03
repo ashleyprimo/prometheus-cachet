@@ -122,6 +122,8 @@ func (alt *alerts) health(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "Healthy.")
 	} else {
 		log.Errorf("Cachet API issue. Response: %s, ERR: %s", pong, err)
+
+		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, "Unhealthy.")
 	}
 }
