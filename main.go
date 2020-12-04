@@ -68,7 +68,7 @@ func (alt *alerts) cachetAlert(status, name, message string) {
 		if strings.ToUpper(status) == "RESOLVED" {
 			log.Infof("Resolving alert \"%s\"", name)
 			incidentResolve := &cachet.IncidentUpdate{
-				Message: "This incdent has been resolved, we apologise for any inconvenience caused.",
+				Message: "This incident has been resolved, we apologise for any inconvenience caused.",
 				Status:  cachet.IncidentStatusFixed,
 			}
 			alt.client.IncidentUpdates.Create(alt.incidents[name],incidentResolve)
